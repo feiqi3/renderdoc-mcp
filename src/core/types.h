@@ -241,14 +241,57 @@ struct ExportResult {
     uint64_t requestedSize = 0;
 };
 
+// --- Attach ---
+
+struct AttachRequest {
+    std::string remoteServer = "127.0.0.1";
+    // Optional matchers. pid==0 means "no pid filter"; empty exeName means
+    // "no name filter". If both are unset the first found target is used.
+    std::string exeName;
+    uint64_t pid = 0;
+};
+
+struct AttachTargetInfo {
+    uint32_t ident = 0;
+    uint32_t pid = 0;
+    std::string targetName;   // usually the executable name on the target machine
+    std::string api;          // empty until the target registered a graphics API
+    std::string busyClient;   // non-empty if another client holds the target
+};
+
+struct AttachCandidates {
+    std::vector<AttachTargetInfo> targets;
+};
+
+struct AttachResult {
+    bool attachSuccess = false;
+    bool isApiInited = false;
+    uint32_t targetIdent = 0;
+    uint32_t pid = 0;
+    std::string targetName;
+    std::string api;
+};
+
+
 // --- Capture ---
 struct CaptureRequest {
     std::string exePath;
     std::string workingDir;
     std::string cmdLine;
     uint32_t delayFrames = 100;
+    uint32_t cycleWindows = 0;
     std::string outputPath;
 };
+
+struct RemoteCaptureRequest {
+    std::string remoteAddress = "127.0.0.1";
+    uint32_t pid = 0;
+    uint32_t ident = 0;
+    uint32_t delayFrames = 100;
+    uint32_t cycleWindows = 0;
+    std::string outputPath;
+};
+
 
 struct CaptureResult {
     std::string capturePath;

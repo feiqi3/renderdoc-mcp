@@ -1,6 +1,7 @@
 // renderdoc-cli — one-shot compound-command CLI
 
 #include "cli/cli_parse.h"
+#include "core/attach.h"
 #include "core/capture.h"
 #include "core/debug.h"
 #include "core/diff.h"
@@ -231,6 +232,56 @@ static void cmdExportRt(Session& session, const std::vector<std::string>& positi
               << "RT index: " << result.rtIndex         << "\n"
               << "Size:     " << result.width << "x" << result.height << "\n"
               << "Bytes:    " << result.byteSize         << "\n";
+}
+
+static void cmdAttachAndCapture(Session& session, const std::string& targetSpec,
+                                const std::string& remoteServer, uint32_t delayFrames,
+                                const std::string& outputPath) {
+    // Numeric target spec = pid, otherwise treat as executable name
+    AttachRequest areq;
+    areq.remoteServer = remoteServer;
+    if (!targetSpec.empty() && targetSpec.find_first_not_of("0123456789") ==
+                                   std::string::npos)
+        areq.pid = std::stoull(targetSpec);
+    else
+        areq.exeName = targetSpec;
+
+    std::cerr << "Try attach: " << targetSpec << " on " << remoteServer << "\n";
+
+    AttachResult ares = AttachProcess(session, areq);
+    if (!ares.attachSuccess) {
+        std::cerr << "error: no matching RenderDoc-injected target found on "
+                  << remoteServer << "\n";
+        std::exit(1);
+    }
+
+    std::cerr << "Attached: " << ares.targetName
+              << " (ident " << ares.targetIdent
+              << ", pid " << ares.pid << ")"
+              << "  api: " << (ares.api.empty() ? "(not inited)" : ares.api) << "\n";
+
+    if (!ares.isApiInited) {
+        std::cerr << "error: target has not initialised a graphics API yet; "
+                     "retry shortly after launch\n";
+        std::exit(1);
+    }
+
+    RemoteCaptureRequest creq;
+    creq.remoteAddress = remoteServer;
+    creq.ident = ares.targetIdent;
+    creq.pid = ares.pid;
+    creq.delayFrames = delayFrames;
+    creq.outputPath = outputPath;
+
+    CaptureResult result = captureFrameRemote(session, creq);
+
+    CaptureInfo info = getCaptureInfo(session);
+
+    std::cout << "Capture:      " << result.capturePath << "\n"
+              << "PID:          " << result.pid << "\n"
+              << "API:          " << apiName(info.api) << "\n"
+              << "Total events: " << info.totalEvents << "\n"
+              << "Total draws:  " << info.totalDraws << "\n";
 }
 
 static void cmdCapture(Session& session, const std::string& exePath,
@@ -1157,6 +1208,18 @@ int main(int argc, char* argv[]) {
             }
             cmdCapture(session, args.positional[0], args.workingDir,
                        args.cmdLineArgs, args.delayFrames, args.outputDir);
+            session.close();
+            return 0;
+        }
+
+        // attach command: first arg is a pid or exe name, not a .rdc file
+        if (args.command == "attach") {
+            if (args.positional.empty()) {
+                std::cerr << "error: 'attach' requires a target (pid or executable name)\n";
+                return 1;
+            }
+            cmdAttachAndCapture(session, args.positional[0], args.remoteServer,
+                                args.delayFrames, args.outputDir);
             session.close();
             return 0;
         }

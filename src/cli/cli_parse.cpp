@@ -85,6 +85,8 @@ void printUsage(const char* argv0) {
               << "  resources [--type TYPE]\n"
               << "  export-rt IDX -o DIR [-e EID]\n"
               << "  capture EXE [-w DIR] [-a ARGS] [-d N] [-o PATH]\n"
+              << "  attach NAME_OR_PID [-s HOST] [-d N] [-o PATH]  (attach to a "
+                 "RenderDoc-injected running process and capture)\n"
               << "  pixel X Y [-e EID] [--target N]\n"
               << "  pick-pixel X Y [-e EID] [--target N]\n"
               << "  debug pixel X Y -e EID [--trace] [--primitive N]\n"
@@ -128,6 +130,26 @@ Args parseArgs(int argc, char* argv[]) {
                 a.workingDir = argv[++i];
             } else if ((tok == "-a" || tok == "--args") && i + 1 < argc) {
                 a.cmdLineArgs = argv[++i];
+            } else if ((tok == "-d" || tok == "--delay-frames") && i + 1 < argc) {
+                a.delayFrames = parseUint32(argv[++i], "--delay-frames");
+            } else if ((tok == "-o" || tok == "--output") && i + 1 < argc) {
+                a.outputDir = argv[++i];
+            } else {
+                a.positional.push_back(tok);
+            }
+            ++i;
+        }
+        return a;
+    }
+
+    // Special case: "attach" command — target is a pid or exe name, not a .rdc
+    if (std::string(argv[1]) == "attach") {
+        a.command = "attach";
+        int i = 2;
+        while (i < argc) {
+            std::string tok = argv[i];
+            if ((tok == "-s" || tok == "--server") && i + 1 < argc) {
+                a.remoteServer = argv[++i];
             } else if ((tok == "-d" || tok == "--delay-frames") && i + 1 < argc) {
                 a.delayFrames = parseUint32(argv[++i], "--delay-frames");
             } else if ((tok == "-o" || tok == "--output") && i + 1 < argc) {

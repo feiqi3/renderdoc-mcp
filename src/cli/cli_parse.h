@@ -47,6 +47,9 @@ struct Args {
     bool listMode = false;
     std::string counterFilter;
     std::optional<uint32_t> cbufferIndex;
+    // Attach / remote capture
+    std::string remoteServer = "127.0.0.1";
+    uint64_t attachPid = 0;
 };
 
 std::optional<renderdoc::core::ShaderStage> parseStage(const std::string& s);

@@ -35,6 +35,7 @@ if(RENDERDOC_DIR)
         src/core/pipeline.cpp
         src/core/export.cpp
         src/core/capture.cpp
+        src/core/attach.cpp
         src/core/renderdoc_tostr_anchor.cpp
         src/core/pixel.cpp
         src/core/debug.cpp

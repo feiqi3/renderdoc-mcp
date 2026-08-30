@@ -297,6 +297,10 @@ CaptureResult captureFrame(Session& session, const CaptureRequest& req) {
             }
         }
 
+        // Select which window to capture in multi-swapchain apps, then trigger.
+        for (uint32_t i = 0; i < req.cycleWindows; ++i)
+            ctrl->CycleActiveWindow();
+
         ctrl->TriggerCapture(1);
 
         // 8. Poll for NewCapture message
@@ -346,6 +350,160 @@ CaptureResult captureFrame(Session& session, const CaptureRequest& req) {
     } // 10. guard destructor calls ctrl->Shutdown()
 
     // 11. Auto-open the capture
+    session.open(outputPath);
+
+    return CaptureResult{outputPath, pid};
+}
+
+CaptureResult captureFrameRemote(Session& session, const RemoteCaptureRequest& req)
+{
+    if (req.ident == 0 && req.pid == 0)
+        throw CoreError(CoreError::Code::InternalError,
+                        "Either ident or pid must be specified for remote capture");
+
+    session.ensureReplayInitialized();
+
+    // RAII guard for ctrl->Shutdown() — single cleanup path, no manual Shutdown()
+    struct CtrlGuard {
+        ITargetControl* c;
+        ~CtrlGuard() { if (c) c->Shutdown(); }
+    };
+
+    std::string outputPath = req.outputPath;
+    uint32_t pid = 0;
+    {
+        // 1. Locate the target control connection.
+        //    Direct ident first (e.g. taken from a prior attach_process call),
+        //    falling back to enumeration filtered by pid.
+        ITargetControl* ctrl = nullptr;
+
+        if (req.ident != 0) {
+            ctrl = RENDERDOC_CreateTargetControl(
+                rdcstr(req.remoteAddress.c_str()), req.ident,
+                rdcstr("renderdoc-mcp"), true);
+            if (ctrl && req.pid != 0 && ctrl->GetPID() != req.pid) {
+                ctrl->Shutdown();
+                ctrl = nullptr; // wrong process, fall through to enumeration
+            }
+        }
+
+        if (!ctrl) {
+            uint32_t ident = 0;
+            while ((ident = RENDERDOC_EnumerateRemoteTargets(
+                        rdcstr(req.remoteAddress.c_str()), ident)) != 0) {
+                ITargetControl* c = RENDERDOC_CreateTargetControl(
+                    rdcstr(req.remoteAddress.c_str()), ident,
+                    rdcstr("renderdoc-mcp"), true);
+                if (!c)
+                    continue;
+                if (req.pid != 0 && c->GetPID() != req.pid) {
+                    c->Shutdown();
+                    continue;
+                }
+                ctrl = c;
+                break;
+            }
+        }
+
+        if (!ctrl)
+            throw CoreError(CoreError::Code::TargetNotFound,
+                            "Failed to connect to target process on " + req.remoteAddress);
+
+        CtrlGuard guard{ctrl};
+
+        pid = ctrl->GetPID();
+        std::string targetName(ctrl->GetTarget().c_str());
+
+        // 2. Output path (local; the remote capture is copied here later)
+        if (outputPath.empty())
+            outputPath = generateOutputPath(
+                targetName.empty() ? "remote_" + req.remoteAddress : targetName);
+        auto outputDir = fs::path(outputPath).parent_path();
+        if (!outputDir.empty())
+            fs::create_directories(outputDir);
+
+        // 3. Wait for delayFrames, pumping messages to keep the connection alive.
+        {
+            uint32_t waitMs = req.delayFrames * 16; // ~16ms per frame at 60fps
+            if (waitMs < 2000) waitMs = 2000;       // minimum 2s for API init
+            auto waitUntil = std::chrono::steady_clock::now() +
+                             std::chrono::milliseconds(waitMs);
+            while (std::chrono::steady_clock::now() < waitUntil) {
+                if (!ctrl->Connected())
+                    throw CoreError(CoreError::Code::InternalError,
+                                    "Target process disconnected during wait");
+                TargetControlMessage msg = ctrl->ReceiveMessage(nullptr);
+                if (msg.type == TargetControlMessageType::Disconnected)
+                    throw CoreError(CoreError::Code::InternalError,
+                                    "Target process disconnected during wait");
+                if (msg.type == TargetControlMessageType::Busy)
+                    throw CoreError(CoreError::Code::InternalError,
+                                    "Target is busy with client: " +
+                                        std::string(ctrl->GetBusyClient().c_str()));
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+
+        // 4. Select which window to capture in multi-swapchain apps, then trigger.
+        for (uint32_t i = 0; i < req.cycleWindows; ++i)
+            ctrl->CycleActiveWindow();
+
+        ctrl->TriggerCapture(1);
+
+        // 5. Wait for NewCapture — the file is written on the REMOTE machine, so
+        //    remember its captureId; the local path in the message is not usable.
+        uint32_t captureId = 0;
+        bool sawNewCapture = false;
+        {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (!ctrl->Connected())
+                    break;
+                TargetControlMessage msg = ctrl->ReceiveMessage(nullptr);
+                if (msg.type == TargetControlMessageType::NewCapture) {
+                    captureId = msg.newCapture.captureId;
+                    sawNewCapture = true;
+                    break;
+                }
+                if (msg.type == TargetControlMessageType::Disconnected)
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+
+        if (!sawNewCapture)
+            throw CoreError(CoreError::Code::InternalError,
+                            "Timed out waiting for the remote capture to complete");
+
+        // 6. Copy the capture over the target control connection. CopyCapture only
+        //    STARTS the transfer — pump messages until CaptureCopied arrives.
+        ctrl->CopyCapture(captureId, rdcstr(outputPath.c_str()));
+
+        bool copied = false;
+        {
+            // Remote captures can be large; allow a generous transfer window.
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(600);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (!ctrl->Connected())
+                    break;
+                TargetControlMessage msg = ctrl->ReceiveMessage(nullptr);
+                if (msg.type == TargetControlMessageType::CaptureCopied) {
+                    copied = true;
+                    break;
+                }
+                if (msg.type == TargetControlMessageType::Disconnected)
+                    break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+
+        if (!copied || !fs::exists(outputPath))
+            throw CoreError(CoreError::Code::InternalError,
+                            copied ? "Copy finished but the file is missing: " + outputPath
+                                   : "Timed out copying the remote capture to local disk");
+    } // 7. guard destructor calls ctrl->Shutdown()
+
+    // 8. Auto-open the capture
     session.open(outputPath);
 
     return CaptureResult{outputPath, pid};
