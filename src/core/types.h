@@ -256,6 +256,7 @@ struct AttachTargetInfo {
     uint32_t pid = 0;
     std::string targetName;   // usually the executable name on the target machine
     std::string api;          // empty until the target registered a graphics API
+    bool isApiInited = false;
     std::string busyClient;   // non-empty if another client holds the target
 };
 

@@ -79,6 +79,7 @@ void registerCaptureTools(ToolRegistry& registry) {
                     {"pid", t.pid},
                     {"targetName", t.targetName},
                     {"api", t.api},
+                    {"isApiInited", t.isApiInited},
                     {"busyClient", t.busyClient},
                 });
             }

@@ -3,6 +3,7 @@
 
 #include <renderdoc_replay.h>
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,11 @@ struct CtrlGuard {
     ITargetControl* c;
     ~CtrlGuard() { if (c) c->Shutdown(); }
 };
+
+// How long to pump messages while waiting for the initial APIUse packet.
+// The target's control thread pushes it on its first tick (~10ms) after we
+// connect, so this only needs to cover connection jitter.
+constexpr auto kApiProbeTimeout = std::chrono::milliseconds(2000);
 
 // Connect to one target ident and gather its info. ident/pid stay valid even
 // when the probe fails to connect (empty targetName signals failure).
@@ -34,8 +40,30 @@ AttachTargetInfo probeTarget(const std::string& host, uint32_t ident) {
 
     info.pid = ctrl->GetPID();
     info.targetName = ctrl->GetTarget().c_str();
-    info.api = ctrl->GetAPI().c_str();
     info.busyClient = ctrl->GetBusyClient().c_str();
+
+    // IMPORTANT: the API name is only surfaced to this client while pumping
+    // ReceiveMessage(). The server pushes an ePacket_APIUse for each active
+    // driver right after we connect; without pumping, GetAPI() stays empty
+    // forever even when the target is actively rendering.
+    // We wait for a PRESENTING API (i.e. capture-ready); a registered but not
+    // yet presenting API is still recorded, just not marked as inited.
+    auto deadline = std::chrono::steady_clock::now() + kApiProbeTimeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        TargetControlMessage msg = ctrl->ReceiveMessage(nullptr);
+
+        if (msg.type == TargetControlMessageType::Disconnected)
+            break;
+
+        if (msg.type == TargetControlMessageType::RegisterAPI) {
+            if (!msg.apiUse.name.isEmpty())
+                info.api = msg.apiUse.name.c_str();
+            if (msg.apiUse.presenting) {
+                info.isApiInited = true;
+                break; // capture-ready
+            }
+        }
+    }
     return info;
 }
 
@@ -83,7 +111,7 @@ AttachResult AttachProcess(Session& session, const AttachRequest& req) {
         result.pid = info.pid;
         result.targetName = info.targetName;
         result.api = info.api;
-        result.isApiInited = !info.api.empty();
+        result.isApiInited = info.isApiInited;
         return result;
     }
 
