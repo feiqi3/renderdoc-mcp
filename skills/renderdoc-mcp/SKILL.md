@@ -1,6 +1,6 @@
 ---
 name: renderdoc-mcp
-description: Analyze RenderDoc GPU frame captures with renderdoc-mcp MCP tools. Use when Codex needs to inspect .rdc captures, diagnose black screens or visual artifacts, explain frame structure, inspect specific draw calls, or investigate GPU rendering and performance issues.
+description: Analyze RenderDoc GPU frame captures with renderdoc-mcp MCP tools. Use when Codex needs to inspect .rdc captures, capture frames from local or remote (network) running processes, diagnose black screens or visual artifacts, explain frame structure, inspect specific draw calls, or investigate GPU rendering and performance issues.
 ---
 
 # RenderDoc MCP
@@ -9,7 +9,13 @@ Use renderdoc-mcp to analyze GPU frame captures and debug rendering problems.
 
 Always use the MCP server named `renderdoc-mcp` for tool calls.
 
-When you need shell-based or batch workflows outside the MCP tool surface, use `renderdoc-cli` from `PATH`.
+When you need shell-based or batch workflows outside the MCP tool surface, use `renderdoc-cli` from `PATH`:
+
+```text
+renderdoc-cli capture app.exe [-w DIR] [-a ARGS] [-d N] [-o PATH]   # launch + capture
+renderdoc-cli attach NAME_OR_PID [-s HOST] [-d N] [-o PATH]          # attach to a running injected process + capture
+renderdoc-cli capture.rdc info                                       # inspect an existing .rdc
+```
 
 ## Analysis Framework
 
@@ -31,11 +37,34 @@ From file: call `open_capture` with the `.rdc` path.
 
 From app: call `capture_frame` to launch the app, inject RenderDoc, capture a frame, and auto-open it.
 
+From a running process: use the attach flow when the target is already running
+with RenderDoc injection active (launched via `capture_frame`, `renderdoccmd`,
+or the RenderDoc UI). Works for local processes and remote hosts:
+
+> **Prerequisite**: attach ONLY works if the target process has already loaded
+> the RenderDoc Dylib (injection active). A normally-launched process cannot be
+> attached — RenderDoc's attach is a target-control connection, not a debugger
+> attach. If the process was started without injection, the only option is to
+> relaunch it with `capture_frame` / `renderdoccmd` / the RenderDoc UI.
+
+```text
+1. list_attach_targets(remoteServer)   -> discover idents/pids/names/APIs
+2. attach_process(pid or exeName)      -> get targetIdent; check isApiInited
+3. capture_frame_remote(ident or pid)  -> capture, copy .rdc over the network, auto-open
+```
+
+- `remoteServer`/`remoteAddress` default to `127.0.0.1` (locally injected processes).
+- `isApiInited: false` means the graphics API is not initialised yet; retry shortly after launch.
+- `cycleWindows` selects which swapchain to capture in multi-window apps.
+- Connecting kicks any other client attached to the same target (e.g. a qrenderdoc LiveCapture window).
+
 Verification: check the returned event count. If it is `0`, the capture is empty and you should report that immediately.
 
 Error recovery:
 - If `open_capture` fails, verify the path exists and points to a valid `.rdc` file.
 - If `capture_frame` fails, check the executable path, whether the app needs admin privileges, whether it exits immediately, and whether `delayFrames` should be increased.
+- If `attach_process` finds nothing, the process was not launched with RenderDoc injection; relaunch it with `capture_frame` or `renderdoccmd`.
+- If `capture_frame_remote` times out, the ident/pid may be stale — re-run `list_attach_targets`.
 
 ### Initial Context Gathering
 
@@ -215,6 +244,9 @@ Apply these checks throughout the analysis:
 | `open_capture` invalid file | The file may be corrupted or not be an `.rdc`; ask for a new capture |
 | `capture_frame` app exits immediately | Check `cmdLine`, `workingDir`, and startup requirements |
 | `capture_frame` no frame captured | Increase `delayFrames` and verify the app actually renders to a window |
+| `attach_process` no matching target | The process was not launched with RenderDoc injection; relaunch it with `capture_frame` or `renderdoccmd` |
+| `attach_process` `isApiInited: false` | The graphics API is not initialised yet; wait briefly and retry |
+| `capture_frame_remote` timeout | The ident/pid may be stale or the app stopped rendering; re-run `list_attach_targets` |
 | `get_shader` empty result | No shader is bound for that stage at this event; try another stage or event |
 | `get_pipeline_state` no render target | Some draws do not output to render targets; inspect draw flags |
 | `export_render_target` index out of range | Check how many render targets are bound and use a valid index from `0` to `7` |
@@ -242,6 +274,9 @@ Do not ask when:
 |------|---------|
 | `open_capture` | Load an `.rdc` file for analysis |
 | `capture_frame` | Launch the app, inject RenderDoc, capture a frame, and auto-open it |
+| `list_attach_targets` | List RenderDoc-injected targets on a host, with ident/pid/name/API |
+| `attach_process` | Attach to a running injected process by pid or exe name; returns `targetIdent` and `isApiInited` |
+| `capture_frame_remote` | Trigger a capture on a running (local or remote) injected process, copy the `.rdc` over the network, and auto-open it |
 
 ### Navigation and Events
 
