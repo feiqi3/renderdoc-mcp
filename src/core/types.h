@@ -64,6 +64,19 @@ struct ShaderBindingDetail {
     uint32_t bindPoint = 0;
     uint32_t byteSize = 0;
     uint32_t variableCount = 0;
+    // "pushConstants" or "specializationConstants" for non-buffer-backed
+    // constant blocks (values readable via read_cbuffer); empty for normal
+    // buffer-backed bindings.
+    std::string kind;
+    // The actually bound resource at this slot at draw/dispatch time.
+    // boundId == 0 means declared in the shader but nothing bound.
+    // boundByteOffset includes dynamic offsets (Vulkan UBO dynamic,
+    // D3D11 CBV offsets, GL glBindBufferRange offsets).
+    ResourceId boundId = 0;
+    uint64_t boundByteOffset = 0;
+    uint64_t boundByteSize = 0;   // 0xFFFFFFFFFFFFFFFF = whole buffer
+    bool boundHasRange = false;   // true only for buffer-backed bindings where
+                                  // boundByteOffset/Size are meaningful
 };
 
 struct StageBindings {
@@ -93,6 +106,127 @@ struct Viewport {
     float x = 0, y = 0, width = 0, height = 0, minDepth = 0, maxDepth = 0;
 };
 
+// A bound vertex/index buffer span.
+struct BoundBufferSpan {
+    uint32_t slot = 0;         // VB slot / binding index
+    ResourceId id = 0;
+    uint64_t byteOffset = 0;
+    uint64_t byteSize = 0;     // 0 = unknown/whole buffer
+    uint32_t byteStride = 0;   // for index buffers: index width (2/4)
+};
+
+struct VertexAttributeInfo {
+    std::string name;          // shader input name (semantic / location var)
+    int32_t vertexBuffer = -1; // vertex buffer slot/binding
+    uint32_t byteOffset = 0;   // offset within each vertex
+    bool tightlyPacked = false;// D3D APPEND_ALIGNED_ELEMENT semantics
+    bool perInstance = false;
+    int32_t instanceRate = 0;
+    std::string format;
+};
+
+struct InputAssemblyInfo {
+    std::string topology;
+    bool primitiveRestart = false;
+    std::optional<BoundBufferSpan> indexBuffer;
+};
+
+struct VertexInputInfo {
+    std::vector<BoundBufferSpan> buffers;         // indexed by VB slot
+    std::vector<VertexAttributeInfo> attributes;  // one per input element
+};
+
+struct DescriptorSetInfo {
+    uint32_t setIndex = 0;
+    ResourceId layoutId = 0;
+    ResourceId setId = 0;
+    bool pushDescriptor = false;
+    struct DynamicOffset {
+        uint64_t descriptorByteOffset = 0;       // identifies the descriptor in the set
+        uint64_t dynamicBufferByteOffset = 0;    // the dynamic offset value applied
+    };
+    std::vector<DynamicOffset> dynamicOffsets;
+};
+
+// --- Pipeline: fixed-function state ---
+
+struct ScissorRect {
+    int32_t x = 0, y = 0, width = 0, height = 0;
+    bool enabled = true;
+};
+
+struct StencilOpInfo {
+    std::string func;        // CompareFunction name
+    std::string failOp, depthFailOp, passOp;  // StencilOperation names
+    uint32_t reference = 0;
+    uint32_t compareMask = 0;
+    uint32_t writeMask = 0;
+};
+
+struct DepthStencilInfo {
+    bool depthTestEnable = false;
+    bool depthWriteEnable = false;
+    std::string depthFunc;   // CompareFunction name
+    bool depthBoundsEnable = false;
+    float minDepthBounds = 0.0f;
+    float maxDepthBounds = 0.0f;
+    bool stencilTestEnable = false;
+    StencilOpInfo frontFace;
+    StencilOpInfo backFace;
+};
+
+struct BlendEquationInfo {
+    std::string source;        // BlendMultiplier name
+    std::string destination;   // BlendMultiplier name
+    std::string operation;     // BlendOperation name
+};
+
+struct BlendTargetInfo {
+    bool blendEnable = false;
+    BlendEquationInfo colorBlend;
+    BlendEquationInfo alphaBlend;
+    uint32_t writeMask = 0;
+};
+
+struct BlendStateInfo {
+    bool independentBlend = false;
+    std::vector<BlendTargetInfo> targets;
+    float blendFactor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+};
+
+struct RasterizerInfo {
+    std::string fillMode;    // Solid / Wireframe / Point
+    std::string cullMode;    // NoCull / Front / Back / FrontAndBack
+    bool frontCCW = false;
+    bool rasterizerDiscard = false;
+    bool depthClipEnable = true;
+    bool scissorEnable = false;
+    bool depthBiasEnable = false;
+    float depthBias = 0.0f;
+    float slopeScaledDepthBias = 0.0f;
+    float depthBiasClamp = 0.0f;
+};
+
+struct MultisampleInfo {
+    uint32_t rasterSamples = 0;
+    uint32_t sampleMask = 0xFFFFFFFF;
+    bool sampleShadingEnable = false;
+    float minSampleShading = 0.0f;
+    bool alphaToCoverage = false;
+};
+
+// Current layout/state of a live resource (Vulkan image layouts or
+// D3D12 resource states). Opt-in via includeResourceStates.
+struct ResourceLayoutInfo {
+    ResourceId resourceId = 0;
+    std::string name;
+    struct LayoutRange {
+        uint32_t baseMip = 0, baseLayer = 0, numMip = 0, numLayer = 0;
+        std::string state;
+    };
+    std::vector<LayoutRange> layouts;
+};
+
 struct PipelineState {
     GraphicsApi api = GraphicsApi::Unknown;
     struct ShaderBinding {
@@ -104,6 +238,29 @@ struct PipelineState {
     std::vector<RenderTargetInfo> renderTargets;
     std::optional<RenderTargetInfo> depthTarget;
     std::vector<Viewport> viewports;
+    std::optional<InputAssemblyInfo> inputAssembly;
+    std::optional<VertexInputInfo> vertexInput;
+    // Vulkan only: bound descriptor sets with raw dynamic offsets
+    std::vector<DescriptorSetInfo> descriptorSets;
+    std::vector<ScissorRect> scissors;
+    std::optional<RasterizerInfo> rasterizer;
+    std::optional<DepthStencilInfo> depthStencil;
+    std::optional<BlendStateInfo> blend;
+    std::optional<MultisampleInfo> multisample;
+    // Vulkan: total pushed-constant bytes at this event
+    uint32_t pushConstantByteSize = 0;
+    // Vulkan/D3D12 only, opt-in: current layout/state of live resources
+    std::vector<ResourceLayoutInfo> resourceStates;
+};
+
+// --- Raw buffer data ---
+
+struct BufferDataResult {
+    ResourceId resourceId = 0;
+    uint64_t bufferLength = 0;   // total buffer size in bytes (0 = unknown)
+    uint64_t byteOffset = 0;
+    uint64_t byteSize = 0;       // bytes actually returned
+    std::vector<uint8_t> bytes;
 };
 
 // --- Resources ---

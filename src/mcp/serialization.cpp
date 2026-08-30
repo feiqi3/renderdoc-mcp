@@ -136,6 +136,171 @@ nlohmann::json to_json(const core::PipelineState& state) {
                        {"minDepth", vp.minDepth}, {"maxDepth", vp.maxDepth}});
     }
     j["viewports"] = vps;
+    if (state.inputAssembly) {
+        const auto& ia = *state.inputAssembly;
+        nlohmann::json jia = {{"topology", ia.topology}, {"primitiveRestart", ia.primitiveRestart}};
+        if (ia.indexBuffer) {
+            jia["indexBuffer"] = {
+                {"resourceId", resourceIdToString(ia.indexBuffer->id)},
+                {"byteOffset", ia.indexBuffer->byteOffset},
+                {"byteSize", ia.indexBuffer->byteSize},
+                {"byteStride", ia.indexBuffer->byteStride}};
+        }
+        j["inputAssembly"] = jia;
+    }
+    if (state.rasterizer) {
+        const auto& r = *state.rasterizer;
+        nlohmann::json jr = {{"fillMode", r.fillMode},
+                             {"cullMode", r.cullMode},
+                             {"frontCCW", r.frontCCW},
+                             {"depthClipEnable", r.depthClipEnable},
+                             {"scissorEnable", r.scissorEnable},
+                             {"depthBiasEnable", r.depthBiasEnable}};
+        if (r.rasterizerDiscard) jr["rasterizerDiscard"] = true;
+        if (r.depthBiasEnable) {
+            jr["depthBias"] = r.depthBias;
+            jr["slopeScaledDepthBias"] = r.slopeScaledDepthBias;
+            jr["depthBiasClamp"] = r.depthBiasClamp;
+        }
+        j["rasterizer"] = jr;
+    }
+    if (state.depthStencil) {
+        const auto& ds = *state.depthStencil;
+        auto stencilToJson = [](const core::StencilOpInfo& s) {
+            return nlohmann::json{{"func", s.func}, {"failOp", s.failOp},
+                                  {"depthFailOp", s.depthFailOp}, {"passOp", s.passOp},
+                                  {"reference", s.reference}, {"compareMask", s.compareMask},
+                                  {"writeMask", s.writeMask}};
+        };
+        nlohmann::json jds = {{"depthTestEnable", ds.depthTestEnable},
+                              {"depthWriteEnable", ds.depthWriteEnable},
+                              {"depthFunc", ds.depthFunc}};
+        if (ds.depthBoundsEnable) {
+            jds["depthBoundsEnable"] = true;
+            jds["minDepthBounds"] = ds.minDepthBounds;
+            jds["maxDepthBounds"] = ds.maxDepthBounds;
+        }
+        if (ds.stencilTestEnable) {
+            jds["stencilTestEnable"] = true;
+            jds["stencilFront"] = stencilToJson(ds.frontFace);
+            jds["stencilBack"] = stencilToJson(ds.backFace);
+        }
+        j["depthStencil"] = jds;
+    }
+    if (state.blend) {
+        const auto& b = *state.blend;
+        nlohmann::json jb = {{"blendFactor", {b.blendFactor[0], b.blendFactor[1],
+                                              b.blendFactor[2], b.blendFactor[3]}}};
+        if (b.independentBlend) jb["independentBlend"] = true;
+        auto jtargets = nlohmann::json::array();
+        for (size_t i = 0; i < b.targets.size(); i++) {
+            const auto& t = b.targets[i];
+            nlohmann::json jt = {{"target", i},
+                                 {"writeMask", t.writeMask},
+                                 {"writeMaskR", (t.writeMask & 1) != 0},
+                                 {"writeMaskG", (t.writeMask & 2) != 0},
+                                 {"writeMaskB", (t.writeMask & 4) != 0},
+                                 {"writeMaskA", (t.writeMask & 8) != 0}};
+            if (t.blendEnable) {
+                jt["blendEnable"] = true;
+                jt["colorBlend"] = {{"source", t.colorBlend.source},
+                                    {"destination", t.colorBlend.destination},
+                                    {"operation", t.colorBlend.operation}};
+                jt["alphaBlend"] = {{"source", t.alphaBlend.source},
+                                    {"destination", t.alphaBlend.destination},
+                                    {"operation", t.alphaBlend.operation}};
+            }
+            jtargets.push_back(jt);
+        }
+        jb["targets"] = jtargets;
+        j["blend"] = jb;
+    }
+    if (state.multisample) {
+        const auto& m = *state.multisample;
+        nlohmann::json jm = {{"rasterSamples", m.rasterSamples},
+                             {"sampleMask", m.sampleMask}};
+        if (m.sampleShadingEnable) {
+            jm["sampleShadingEnable"] = true;
+            jm["minSampleShading"] = m.minSampleShading;
+        }
+        if (m.alphaToCoverage) jm["alphaToCoverage"] = true;
+        j["multisample"] = jm;
+    }
+    auto jsc = nlohmann::json::array();
+    for (const auto& s : state.scissors) {
+        jsc.push_back({{"x", s.x}, {"y", s.y}, {"width", s.width},
+                       {"height", s.height}, {"enabled", s.enabled}});
+    }
+    if (!jsc.empty()) j["scissors"] = jsc;
+    if (state.pushConstantByteSize > 0)
+        j["pushConstantByteSize"] = state.pushConstantByteSize;
+    if (!state.resourceStates.empty()) {
+        auto jrs = nlohmann::json::array();
+        for (const auto& r : state.resourceStates) {
+            nlohmann::json jr = {{"resourceId", resourceIdToString(r.resourceId)}};
+            if (!r.name.empty()) jr["name"] = r.name;
+            auto jlays = nlohmann::json::array();
+            for (const auto& lay : r.layouts) {
+                nlohmann::json jl = {{"state", lay.state}};
+                if (lay.numMip > 1 || lay.numLayer > 1) {
+                    jl["baseMip"] = lay.baseMip;
+                    jl["numMip"] = lay.numMip;
+                    jl["baseLayer"] = lay.baseLayer;
+                    jl["numLayer"] = lay.numLayer;
+                }
+                jlays.push_back(jl);
+            }
+            jr["layouts"] = jlays;
+            jrs.push_back(jr);
+        }
+        j["resourceStates"] = jrs;
+    }
+    if (state.vertexInput) {
+        const auto& vi = *state.vertexInput;
+        nlohmann::json jvi;
+        auto jbufs = nlohmann::json::array();
+        for (const auto& b : vi.buffers) {
+            nlohmann::json jb = {{"slot", b.slot},
+                                 {"resourceId", resourceIdToString(b.id)},
+                                 {"byteOffset", b.byteOffset},
+                                 {"byteStride", b.byteStride}};
+            if (b.byteSize > 0) jb["byteSize"] = b.byteSize;
+            jbufs.push_back(jb);
+        }
+        jvi["buffers"] = jbufs;
+        auto jattrs = nlohmann::json::array();
+        for (const auto& a : vi.attributes) {
+            nlohmann::json ja = {{"name", a.name},
+                                 {"vertexBuffer", a.vertexBuffer},
+                                 {"byteOffset", a.byteOffset},
+                                 {"format", a.format}};
+            if (a.tightlyPacked) ja["tightlyPacked"] = true;
+            if (a.perInstance) {
+                ja["perInstance"] = true;
+                ja["instanceRate"] = a.instanceRate;
+            }
+            jattrs.push_back(ja);
+        }
+        jvi["attributes"] = jattrs;
+        j["vertexInput"] = jvi;
+    }
+    if (!state.descriptorSets.empty()) {
+        auto jsets = nlohmann::json::array();
+        for (const auto& ds : state.descriptorSets) {
+            nlohmann::json jd = {{"setIndex", ds.setIndex},
+                                 {"layoutId", resourceIdToString(ds.layoutId)},
+                                 {"setId", resourceIdToString(ds.setId)}};
+            if (ds.pushDescriptor) jd["pushDescriptor"] = true;
+            auto joffs = nlohmann::json::array();
+            for (const auto& off : ds.dynamicOffsets) {
+                joffs.push_back({{"descriptorByteOffset", off.descriptorByteOffset},
+                                 {"dynamicBufferByteOffset", off.dynamicBufferByteOffset}});
+            }
+            jd["dynamicOffsets"] = joffs;
+            jsets.push_back(jd);
+        }
+        j["descriptorSets"] = jsets;
+    }
     return j;
 }
 
@@ -148,6 +313,15 @@ nlohmann::json to_json(const core::StageBindings& b) {
             nlohmann::json item = {{"name", bd.name}, {"bindPoint", bd.bindPoint}};
             if (bd.byteSize > 0) item["byteSize"] = bd.byteSize;
             if (bd.variableCount > 0) item["variables"] = bd.variableCount;
+            if (!bd.kind.empty()) item["kind"] = bd.kind;
+            if (bd.boundId != 0) {
+                nlohmann::json bound = {{"resourceId", resourceIdToString(bd.boundId)}};
+                if (bd.boundHasRange) {
+                    bound["byteOffset"] = bd.boundByteOffset;
+                    bound["byteSize"] = bd.boundByteSize;
+                }
+                item["bound"] = bound;
+            }
             arr.push_back(item);
         }
         return arr;

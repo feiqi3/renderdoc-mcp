@@ -213,6 +213,53 @@ ResourceInfo getResourceDetails(const Session& session, ResourceId id) {
 
 // ---------------------------------------------------------------------------
 
+BufferDataResult getBufferData(const Session& session, ResourceId id,
+                               uint64_t byteOffset, uint64_t byteSize) {
+    auto* ctrl = session.controller(); // throws NoCaptureOpen if not open
+
+    ::ResourceId targetId = fromResourceId(id);
+
+    // Resolve the buffer and its total length.
+    const auto& buffers = ctrl->GetBuffers();
+    const BufferDescription* found = nullptr;
+    for (const auto& buf : buffers) {
+        if (buf.resourceId == targetId) {
+            found = &buf;
+            break;
+        }
+    }
+
+    if (!found)
+        throw CoreError(CoreError::Code::InvalidResourceId,
+                        "Buffer not found: " + std::to_string(id) +
+                        " (get_buffer_data only works on buffer resources)");
+
+    uint64_t length = found->length;
+    if (byteOffset >= length)
+        throw CoreError(CoreError::Code::InvalidResourceId,
+                        "byteOffset " + std::to_string(byteOffset) +
+                        " beyond buffer length " + std::to_string(length));
+
+    uint64_t available = length - byteOffset;
+    uint64_t request = byteSize == 0 ? std::min<uint64_t>(available, 4096) : byteSize;
+    request = std::min<uint64_t>(request, available);
+
+    BufferDataResult result;
+    result.resourceId = id;
+    result.bufferLength = length;
+    result.byteOffset = byteOffset;
+    result.byteSize = request;
+
+    if (request == 0) return result;
+
+    bytebuf data = ctrl->GetBufferData(targetId, byteOffset, request);
+    result.byteSize = data.size();
+    result.bytes.assign(data.begin(), data.end());
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+
 std::vector<PassInfo> listPasses(const Session& session) {
     auto* ctrl = session.controller(); // throws NoCaptureOpen if not open
 

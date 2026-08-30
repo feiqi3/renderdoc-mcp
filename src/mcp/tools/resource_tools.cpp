@@ -5,6 +5,9 @@
 #include "core/pass_analysis.h"
 #include "core/resources.h"
 
+#include <algorithm>
+#include <cstring>
+
 namespace renderdoc::mcp::tools {
 
 void registerResourceTools(ToolRegistry& registry) {
@@ -25,6 +28,66 @@ void registerResourceTools(ToolRegistry& registry) {
             nlohmann::json result;
             result["resources"] = to_json_array(resources);
             result["count"]     = resources.size();
+            return result;
+        }
+    });
+
+    // get_buffer_data
+    registry.registerTool({
+        "get_buffer_data",
+        "Read raw bytes from a buffer resource (vertex buffer, index buffer, SSBO, generic buffer) "
+        "at the current event. Returns the bytes as hex plus decoded float/int/uint views. "
+        "byteSize 0 defaults to 4096 bytes. Keep requests small (a few KB) to avoid flooding context.",
+        {{"type", "object"},
+         {"properties", {
+             {"resourceId", {{"type", "string"}, {"description", "Buffer resource ID (e.g. ResourceId::123)"}}},
+             {"byteOffset", {{"type", "integer"}, {"description", "Byte offset into the buffer (default 0)"}}},
+             {"byteSize", {{"type", "integer"}, {"description", "Number of bytes to read (0 = default 4096, clamped to buffer end)"}}},
+             {"floatCount", {{"type", "integer"}, {"description", "How many floats to decode (default 64, max 4096)"}}}
+          }},
+          {"required", {"resourceId"}}},
+        [](mcp::ToolContext& ctx, const nlohmann::json& args) -> nlohmann::json {
+            auto& session = ctx.session;
+            auto id   = parseResourceId(args["resourceId"].get<std::string>());
+            uint64_t byteOffset = args.value("byteOffset", 0);
+            uint64_t byteSize   = args.value("byteSize", 0);
+            uint32_t floatCount = args.value("floatCount", 64);
+            if (floatCount > 4096) floatCount = 4096;
+
+            auto data = core::getBufferData(session, id, byteOffset, byteSize);
+
+            nlohmann::json result;
+            result["resourceId"]  = resourceIdToString(data.resourceId);
+            if (data.bufferLength > 0) result["bufferLength"] = data.bufferLength;
+            result["byteOffset"]  = data.byteOffset;
+            result["byteSize"]    = data.byteSize;
+
+            static const char hexDigits[] = "0123456789abcdef";
+            std::string hex;
+            hex.reserve(data.bytes.size() * 2);
+            for (uint8_t b : data.bytes) {
+                hex.push_back(hexDigits[b >> 4]);
+                hex.push_back(hexDigits[b & 0xF]);
+            }
+            result["hex"] = hex;
+
+            size_t maxFloats = std::min<size_t>(floatCount, data.bytes.size() / 4);
+            auto floats = nlohmann::json::array();
+            for (size_t i = 0; i < maxFloats; i++) {
+                float f;
+                std::memcpy(&f, data.bytes.data() + i * 4, sizeof(f));
+                floats.push_back(f);
+            }
+            if (!floats.empty()) result["floats"] = floats;
+
+            auto uints = nlohmann::json::array();
+            size_t maxUints = std::min<size_t>(64, data.bytes.size() / 4);
+            for (size_t i = 0; i < maxUints; i++) {
+                uint32_t u;
+                std::memcpy(&u, data.bytes.data() + i * 4, sizeof(u));
+                uints.push_back(u);
+            }
+            if (!uints.empty()) result["uints"] = uints;
             return result;
         }
     });

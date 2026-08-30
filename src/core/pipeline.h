@@ -8,7 +8,8 @@ namespace renderdoc::core {
 class Session;
 
 PipelineState getPipelineState(const Session& session,
-                                std::optional<uint32_t> eventId = std::nullopt);
+                                std::optional<uint32_t> eventId = std::nullopt,
+                                bool includeResourceStates = false);
 
 std::map<ShaderStage, StageBindings> getBindings(
     const Session& session,
